@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Jet Shooter — WASD + Mouse Aim</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  html,body { height:100%; margin:0; background:#05060a; color:#fff; font-family: Inter, Roboto, Arial, sans-serif; }
+  canvas { display:block; background: transparent; }
+  #menu, #gameOver, #shop { position:fixed; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; background: rgba(5,6,10,0.96); z-index:10; flex-direction:column; gap:12px; }
+  button { padding:10px 18px; font-size:16px; background:#1f2937; color:#fff; border:0; border-radius:6px; cursor:pointer; }
+  button:hover { background:#374151; }
+  #hud { position:fixed; top:12px; left:12px; z-index:5; font-size:16px; color:#dbeafe; display:none; }
+  #weapon { position:fixed; top:12px; right:12px; z-index:5; font-size:16px; color:#dbeafe; display:none; }
+  .small { font-size:13px; color:#9ca3af; }
+  .col { display:flex; gap:8px; align-items:center; }
+  .stat { background:#0b1220aa; padding:6px 10px; border-radius:6px; }
+</style>
+</head>
+<body>
+
+<!-- Menu -->
+<div id="menu">
+  <h1 style="margin:0 0 6px 0">Jet Shooter</h1>
+  <div class="col small" style="gap:14px;">
+    <div class="stat">Select difficulty:</div>
+    <button data-difficulty="easy">Easy</button>
+    <button data-difficulty="medium">Medium</button>
+    <button data-difficulty="hard">Hard</button>
+  </div>
+  <div style="margin-top:12px" class="small">
+    <div id="highScoreDisplay">High Score: 0</div>
+    <div id="currencyDisplay">Total Points: 0</div>
+  </div>
+  <div style="margin-top:12px">
+    <button id="shopBtn">Upgrade Shop</button>
+  </div>
+  <div class="small" style="margin-top:14px; color:#93c5fd; max-width:700px">
+    Controls: WASD to move, move mouse to aim, hold left mouse button to shoot. Collect power-ups and permanent upgrades in the shop.
+  </div>
+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="score">Score: 0</div>
+  <div id="currency" class="small">Points Collected: 0</div>
+</div>
+<div id="weapon" style="display:none">Weapon: Single</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<!-- Game Over -->
+<div id="gameOver" style="display:none; flex-direction:column;">
+  <div id="finalScore" style="font-size:20px"></div>
+  <div id="timeSurvived" class="small"></div>
+  <div id="highScoreText" class="small" style="margin-top:6px"></div>
+  <div style="margin-top:18px">
+    <button id="menuBtn">Menu</button>
+  </div>
+</div>
+
+<!-- Shop -->
+<div id="shop" style="display:none; flex-direction:column;">
+  <h2 style="margin:0">Upgrade Shop</h2>
+  <div id="shopCurrency" class="small" style="margin-bottom:10px">Points Available: 0</div>
+  <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center; width:100%; max-width:760px;">
+    <button id="upgradeSpeed">Increase Speed (+1) — 50 pts</button>
+    <button id="upgradeFireRate">Permanent Fire Rate -100ms — 50 pts</button>
+    <button id="upgradeStartWeapon">Start With Spread — 100 pts</button>
+    <button id="upgradeStartLaser">Start With Laser — 200 pts</button>
+  </div>
+  <div style="margin-top:12px"><button id="backToMenu">Back to Menu</button></div>
+</div>
+
+<script>
+// ===== canvas setup =====
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+// ===== starfield background =====
+const stars = [];
+for(let i=0;i<140;i++){
+  stars.push({x: Math.random()*canvas.width, y: Math.random()*canvas.height, r: Math.random()*1.6+0.4, vx: (Math.random()*0.6-0.3)*0.1});
+}
+function drawBackground(dt){
+  const g = ctx.createLinearGradient(0,0,0,canvas.height);
+  g.addColorStop(0, '#071026');
+  g.addColorStop(1, '#030409');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+  for(let s of stars){
+    s.x += s.vx * dt * 0.06;
+    if(s.x < 0) s.x = canvas.width;
+    if(s.x > canvas.width) s.x = 0;
+    ctx.beginPath();
+    ctx.fillStyle = '#bfe7ff';
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ===== state =====
+let bullets = [], enemies = [], powerUps = [], particles = [];
+let score = 0;
+let fireRate = parseInt(localStorage.getItem('permanentFireRate')) || 500; // ms
+let lastShot = 0;
+let currentWeapon = (localStorage.getItem('startWeapon') || 'Single');
+let gameOver = false;
+let startTime = 0;
+let spawnIntervalTime = 1000;
+let enemySpeedMultiplier = 1;
+let spawnInterval = null;
+
+// persistent data
+let totalPoints = parseInt(localStorage.getItem('totalPoints')) || 0;
+let highScore = parseInt(localStorage.getItem('shooterHighScore')) || 0;
+
+// player
+const player = {
+  x: canvas.width/2 - 24,
+  y: canvas.height - 140,
+  width: 48,
+  height: 48,
+  speed: parseInt(localStorage.getItem('permanentSpeed')) || 5,
+  angle: 0
+};
+
+// mouse and shooting state
+let mouseX = player.x + player.width/2;
+let mouseY = player.y + player.height/2;
+let mouseDown = false;
+window.addEventListener('mousemove', (e)=>{ mouseX = e.clientX; mouseY = e.clientY; });
+window.addEventListener('mousedown', (e)=>{ if(e.button===0) mouseDown = true; });
+window.addEventListener('mouseup', (e)=>{ if(e.button===0) mouseDown = false; });
+
+// WASD movement
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// ===== utilities =====
+function rand(a,b){ return Math.random()*(b-a)+a; }
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function angleTo(fromX, fromY, toX, toY){ return Math.atan2(toY-fromY, toX-fromX); }
+
+// ===== entities =====
+class Bullet {
+  constructor(x,y,vx,vy, friendly=true){
+    this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.w = 6; this.h = 12; this.friendly = friendly;
+  }
+  update(dt){ this.x += this.vx * dt * 0.06; this.y += this.vy * dt * 0.06; }
+  draw(){
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    const ang = Math.atan2(this.vy, this.vx) + Math.PI/2;
+    ctx.rotate(ang);
+    ctx.fillStyle = this.friendly ? '#7ee2ff' : '#ff6868';
+    ctx.fillRect(-this.w/2, -this.h, this.w, this.h);
+    ctx.restore();
+  }
+}
+
+class Enemy {
+  constructor(x,y,type='red'){
+    this.x = x; this.y = y; this.type = type;
+    this.w = (type==='purple'?52: type==='orange'?38:44);
+    this.h = this.w;
+    this.baseSpeed = type==='red'?2: type==='orange'?3.2:1.6;
+    this.points = type==='red'?10: type==='orange'?20:30;
+  }
+  update(dt){
+    // homing toward player's center (simple steering)
+    const px = player.x + player.width/2;
+    const py = player.y + player.height/2;
+    const ang = Math.atan2(py - (this.y + this.h/2), px - (this.x + this.w/2));
+    const speed = this.baseSpeed * enemySpeedMultiplier;
+    this.x += Math.cos(ang) * speed * dt * 0.06;
+    this.y += Math.sin(ang) * speed * dt * 0.06;
+  }
+  draw(){
+    const color = this.type==='red' ? '#ff5f5f' : (this.type==='orange' ? '#ff9a3c' : '#b57aff');
+    drawJet(this.x, this.y, color, false, Math.max(this.w, 26));
+  }
+}
+
+class PowerUp {
+  constructor(x,y,kind){
+    this.x = x; this.y = y; this.kind = kind; this.size = 22; this.speed = 2;
+  }
+  update(dt){ this.y += this.speed * dt * 0.06; }
+  draw(){
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    if(this.kind==='firerate') ctx.fillStyle = '#39c5d6';
+    else if(this.kind==='points') ctx.fillStyle = '#ff6ad5';
+    else if(this.kind==='spread') ctx.fillStyle = '#ffb86b';
+    else if(this.kind==='laser') ctx.fillStyle = '#7aff9e';
+    ctx.beginPath();
+    ctx.arc(0,0,this.size/2,0,Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+class Particle {
+  constructor(x,y,color){
+    this.x = x; this.y = y; this.vx = rand(-2,2); this.vy = rand(-2,-6); this.life = rand(400,900); this.created = performance.now(); this.color = color;
+  }
+  update(dt){ this.vy += 0.08 * dt * 0.06; this.x += this.vx; this.y += this.vy; }
+  draw(){
+    const age = performance.now() - this.created;
+    const t = age/this.life;
+    if(t>1) return;
+    ctx.globalAlpha = 1 - t;
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, 3, 3);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// draw a jet with rotation based on facing angle
+function drawJet(x,y,color,facingUp=true,size=28, angle=0){
+  // x,y is top-left of bounding box. We will center and rotate.
+  const cx = x + size/2, cy = y + size/2;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(angle + (facingUp?0:Math.PI));
+  // body
+  ctx.beginPath();
+  ctx.moveTo(0, -size*0.6);
+  ctx.lineTo(-size*0.35, size*0.45);
+  ctx.lineTo(0, size*0.18);
+  ctx.lineTo(size*0.35, size*0.45);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  // wings
+  ctx.beginPath();
+  ctx.moveTo(-size*0.35, size*0.25);
+  ctx.lineTo(-size*0.85, size*0.9);
+  ctx.lineTo(-size*0.35, size*0.5);
+  ctx.closePath();
+  ctx.fillStyle = shade(color, 1.08);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(size*0.35, size*0.25);
+  ctx.lineTo(size*0.85, size*0.9);
+  ctx.lineTo(size*0.35, size*0.5);
+  ctx.closePath();
+  ctx.fillStyle = shade(color, 1.08);
+  ctx.fill();
+  // cockpit
+  ctx.beginPath();
+  ctx.ellipse(0, -size*0.15, size*0.18, size*0.12, 0, 0, Math.PI*2);
+  ctx.fillStyle = '#cfe9ff';
+  ctx.fill();
+  ctx.restore();
+}
+function shade(hex, factor){
+  try{
+    if(hex[0]==='#') hex = hex.slice(1);
+    let num = parseInt(hex,16);
+    let r = (num >> 16) & 0xff;
+    let g = (num >> 8) & 0xff;
+    let b = num & 0xff;
+    r = Math.min(255, Math.floor(r*factor));
+    g = Math.min(255, Math.floor(g*factor));
+    b = Math.min(255, Math.floor(b*factor));
+    return '#' + ((1<<24) + (r<<16) + (g<<8) + b).toString(16).slice(1);
+  }catch(e){ return hex; }
+}
+
+// ===== spawn logic =====
+function spawnEnemy(){
+  if(gameOver) return;
+  const x = rand(50, canvas.width-50);
+  const roll = Math.random();
+  let type = 'red';
+  if(roll < 0.08) type = 'purple';
+  else if(roll < 0.36) type = 'orange';
+  enemies.push(new Enemy(x, -60, type));
+}
+function startSpawning(){
+  if(spawnInterval) clearInterval(spawnInterval);
+  spawnInterval = setInterval(spawnEnemy, spawnIntervalTime);
+}
+function stopSpawning(){ if(spawnInterval) clearInterval(spawnInterval); spawnInterval = null; }
+
+// ===== shooting while holding mouse button =====
+function tryToShoot(){
+  if(gameOver) return;
+  if(!mouseDown) return;
+  const now = performance.now();
+  if(now - lastShot < fireRate) return;
+  // compute angle from player center to mouse
+  const px = player.x + player.width/2;
+  const py = player.y + player.height/2;
+  const ang = angleTo(px, py, mouseX, mouseY); // radians
+  const speed = 14; // bullet base speed
+  // different weapon patterns
+  if(currentWeapon === 'Single'){
+    const vx = Math.cos(ang) * speed;
+    const vy = Math.sin(ang) * speed;
+    bullets.push(new Bullet(px, py, vx, vy, true));
+  } else if(currentWeapon === 'Spread'){
+    const spread = 0.18;
+    for(let i=-1;i<=1;i++){
+      const a = ang + i*spread;
+      bullets.push(new Bullet(px, py, Math.cos(a)*speed, Math.sin(a)*speed, true));
+    }
+  } else if(currentWeapon === 'Laser'){
+    for(let i=-2;i<=2;i++){
+      const a = ang + i*0.08;
+      bullets.push(new Bullet(px, py, Math.cos(a)*speed, Math.sin(a)*speed, true));
+    }
+  }
+  lastShot = now;
+}
+
+// ===== main loop =====
+let lastFrame = performance.now();
+function loop(now){
+  const dt = now - lastFrame;
+  lastFrame = now;
+
+  if(!gameOver){
+    // background
+    drawBackground(dt);
+
+    // process WASD movement
+    let mvx = 0, mvy = 0;
+    if(keys['w']) mvy -= 1;
+    if(keys['s']) mvy += 1;
+    if(keys['a']) mvx -= 1;
+    if(keys['d']) mvx += 1;
+    // normalize diagonal speed
+    if(mvx !== 0 && mvy !== 0){ const f = Math.sqrt(0.5); mvx *= f; mvy *= f; }
+    player.x += mvx * player.speed * dt * 0.06;
+    player.y += mvy * player.speed * dt * 0.06;
+    // clamp to screen
+    player.x = clamp(player.x, 0, canvas.width - player.width);
+    player.y = clamp(player.y, 0, canvas.height - player.height);
+
+    // instant rotation to face mouse
+    const centerX = player.x + player.width/2;
+    const centerY = player.y + player.height/2;
+    player.angle = angleTo(centerX, centerY, mouseX, mouseY);
+
+    // draw engine glow behind player
+    ctx.save();
+    const glowX = centerX, glowY = player.y + player.height*0.9;
+    const ggrad = ctx.createRadialGradient(glowX, glowY, 0, glowX, glowY, 40);
+    ggrad.addColorStop(0, 'rgba(130,200,255,0.45)');
+    ggrad.addColorStop(1, 'rgba(130,200,255,0.0)');
+    ctx.fillStyle = ggrad;
+    ctx.beginPath();
+    ctx.ellipse(glowX, glowY, 24, 14, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // draw player (rotated to angle)
+    drawJet(player.x, player.y, '#7fb0d9', true, Math.max(player.width, 36), player.angle);
+
+    // shooting
+    tryToShoot();
+
+    // update bullets
+    for(let i = bullets.length-1; i >= 0; --i){
+      const b = bullets[i];
+      b.update(dt);
+      if(b.x < -50 || b.x > canvas.width + 50 || b.y < -50 || b.y > canvas.height + 50){
+        bullets.splice(i,1);
+      }
+    }
+    // draw bullets
+    for(const b of bullets) b.draw();
+
+    // update enemies (homing) & collisions
+    for(let i = enemies.length-1; i >= 0; --i){
+      const e = enemies[i];
+      e.update(dt);
+      // check collision with bullets
+      let died = false;
+      for(let j = bullets.length-1; j >= 0; --j){
+        const b = bullets[j];
+        if(!b.friendly) continue;
+        if(b.x > e.x && b.x < e.x + e.w && b.y > e.y && b.y < e.y + e.h){
+          // hit
+          bullets.splice(j,1);
+          // particles
+          for(let p=0;p<10;p++) particles.push(new Particle(e.x + e.w/2 + rand(-8,8), e.y + e.h/2 + rand(-8,8), '#7ee2ff'));
+          score += e.points;
+          totalPoints += e.points;
+          localStorage.setItem('totalPoints', totalPoints);
+          // drop power-up sometimes
+          if(Math.random() < 0.22){
+            const kinds = ['firerate','points','spread','laser'];
+            const kind = kinds[Math.floor(Math.random()*kinds.length)];
+            powerUps.push(new PowerUp(e.x + e.w/2, e.y + e.h/2, kind));
+          }
+          enemies.splice(i,1);
+          died = true;
+          break;
+        }
+      }
+      if(died) continue;
+      // remove if offscreen too far
+      if(e.x < -100 || e.x > canvas.width + 100 || e.y > canvas.height + 120){ enemies.splice(i,1); continue; }
+      // draw enemy
+      e.draw();
+      // enemy collisions with player
+      if(player.x < e.x + e.w && player.x + player.width > e.x && player.y < e.y + e.h && player.y + player.height > e.y){
+        endGame();
+        return;
+      }
+    }
+
+    // power-ups update/draw/collect
+    for(let i = powerUps.length-1; i >= 0; --i){
+      const p = powerUps[i];
+      p.update(dt);
+      // collect?
+      if(player.x < p.x + p.size/2 && player.x + player.width > p.x - p.size/2 &&
+         player.y < p.y + p.size/2 && player.y + player.height > p.y - p.size/2){
+        if(p.kind === 'firerate') fireRate = Math.max(60, Math.floor(fireRate * 0.7));
+        else if(p.kind === 'points'){ score += 50; totalPoints += 50; localStorage.setItem('totalPoints', totalPoints); }
+        else if(p.kind === 'spread'){ currentWeapon = 'Spread'; }
+        else if(p.kind === 'laser'){ currentWeapon = 'Laser'; }
+        for(let k=0;k<6;k++) particles.push(new Particle(p.x + rand(-6,6), p.y + rand(-6,6), '#ffd37a'));
+        powerUps.splice(i,1);
+        continue;
+      }
+      if(p.y > canvas.height + 60) { powerUps.splice(i,1); continue; }
+      p.draw();
+    }
+
+    // particles update/draw
+    for(let i = particles.length-1; i >= 0; --i){
+      const P = particles[i];
+      P.update(dt);
+      P.draw();
+      if(performance.now() - P.created > P.life) particles.splice(i,1);
+    }
+
+    // HUD
+    document.getElementById('score').textContent = 'Score: ' + Math.floor(score);
+    document.getElementById('currency').textContent = 'Points Collected: ' + Math.floor(totalPoints);
+    document.getElementById('weapon').textContent = 'Weapon: ' + currentWeapon;
+
+    // next frame
+    requestAnimationFrame(loop);
+  }
+}
+
+// ===== end/start game =====
+function endGame(){
+  gameOver = true;
+  stopSpawning();
+  document.getElementById('gameCanvas').style.display = 'none';
+  document.getElementById('hud').style.display = 'none';
+  document.getElementById('weapon').style.display = 'none';
+  document.getElementById('gameOver').style.display = 'flex';
+  document.getElementById('finalScore').textContent = 'Score: ' + Math.floor(score);
+  const seconds = Math.floor((Date.now() - startTime)/1000);
+  document.getElementById('timeSurvived').textContent = 'Time Survived: ' + seconds + 's';
+  highScore = Math.max(highScore, Math.floor(score));
+  localStorage.setItem('shooterHighScore', highScore);
+  document.getElementById('highScoreText').textContent = 'High Score: ' + highScore;
+}
+
+function startGame(){
+  bullets = []; enemies = []; powerUps = []; particles = [];
+  score = 0; lastShot = 0; gameOver = false;
+  // load perm upgrades
+  player.speed = parseInt(localStorage.getItem('permanentSpeed')) || 5;
+  fireRate = parseInt(localStorage.getItem('permanentFireRate')) || 500;
+  currentWeapon = (localStorage.getItem('startWeapon') || 'Single');
+  // UI
+  document.getElementById('menu').style.display = 'none';
+  document.getElementById('shop').style.display = 'none';
+  document.getElementById('gameOver').style.display = 'none';
+  document.getElementById('gameCanvas').style.display = 'block';
+  document.getElementById('hud').style.display = 'block';
+  document.getElementById('weapon').style.display = 'block';
+  startTime = Date.now();
+  startSpawning();
+  lastFrame = performance.now();
+  requestAnimationFrame(loop);
+}
+
+// ===== menu/shop logic =====
+function updateMenuDisplays(){
+  highScore = parseInt(localStorage.getItem('shooterHighScore')) || 0;
+  totalPoints = parseInt(localStorage.getItem('totalPoints')) || 0;
+  document.getElementById('highScoreDisplay').textContent = 'High Score: ' + highScore;
+  document.getElementById('currencyDisplay').textContent = 'Total Points: ' + totalPoints;
+}
+
+document.querySelectorAll('#menu button[data-difficulty]').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const diff = btn.getAttribute('data-difficulty');
+    if(diff === 'easy'){ spawnIntervalTime = 1200; enemySpeedMultiplier = 0.8; }
+    else if(diff === 'medium'){ spawnIntervalTime = 1000; enemySpeedMultiplier = 1.0; }
+    else if(diff === 'hard'){ spawnIntervalTime = 700; enemySpeedMultiplier = 1.5; }
+    startGame();
+  });
+});
+
+document.getElementById('shopBtn').addEventListener('click', ()=>{
+  document.getElementById('menu').style.display = 'none';
+  document.getElementById('shop').style.display = 'flex';
+  document.getElementById('shopCurrency').textContent = 'Points Available: ' + (parseInt(localStorage.getItem('totalPoints')) || 0);
+});
+
+document.getElementById('upgradeSpeed').addEventListener('click', ()=>{
+  totalPoints = parseInt(localStorage.getItem('totalPoints')) || 0;
+  if(totalPoints >= 50){
+    totalPoints -= 50;
+    localStorage.setItem('totalPoints', totalPoints);
+    const cur = parseInt(localStorage.getItem('permanentSpeed')) || 5;
+    localStorage.setItem('permanentSpeed', cur + 1);
+    document.getElementById('shopCurrency').textContent = 'Points Available: ' + totalPoints;
+  }
+});
+document.getElementById('upgradeFireRate').addEventListener('click', ()=>{
+  totalPoints = parseInt(localStorage.getItem('totalPoints')) || 0;
+  if(totalPoints >= 50){
+    totalPoints -= 50;
+    localStorage.setItem('totalPoints', totalPoints);
+    const cur = parseInt(localStorage.getItem('permanentFireRate')) || 500;
+    localStorage.setItem('permanentFireRate', Math.max(80, cur - 100));
+    document.getElementById('shopCurrency').textContent = 'Points Available: ' + totalPoints;
+  }
+});
+document.getElementById('upgradeStartWeapon').addEventListener('click', ()=>{
+  totalPoints = parseInt(localStorage.getItem('totalPoints')) || 0;
+  if(totalPoints >= 100){
+    totalPoints -= 100;
+    localStorage.setItem('totalPoints', totalPoints);
+    localStorage.setItem('startWeapon', 'Spread');
+    document.getElementById('shopCurrency').textContent = 'Points Available: ' + totalPoints;
+  }
+});
+document.getElementById('upgradeStartLaser').addEventListener('click', ()=>{
+  totalPoints = parseInt(localStorage.getItem('totalPoints')) || 0;
+  if(totalPoints >= 200){
+    totalPoints -= 200;
+    localStorage.setItem('totalPoints', totalPoints);
+    localStorage.setItem('startWeapon', 'Laser');
+    document.getElementById('shopCurrency').textContent = 'Points Available: ' + totalPoints;
+  }
+});
+document.getElementById('backToMenu').addEventListener('click', ()=>{
+  document.getElementById('shop').style.display = 'none';
+  document.getElementById('menu').style.display = 'flex';
+  updateMenuDisplays();
+});
+document.getElementById('menuBtn').addEventListener('click', ()=>{
+  document.getElementById('gameOver').style.display = 'none';
+  document.getElementById('menu').style.display = 'flex';
+  updateMenuDisplays();
+});
+
+updateMenuDisplays();
+
+// make canvas visible stacking
+document.getElementById('gameCanvas').style.position = 'fixed';
+document.getElementById('gameCanvas').style.top = 0;
+document.getElementById('gameCanvas').style.left = 0;
+document.getElementById('gameCanvas').style.zIndex = 1;
+document.getElementById('hud').style.zIndex = 4;
+document.getElementById('weapon').style.zIndex = 4;
+document.getElementById('gameCanvas').style.display = 'none';
+</script>
+</body>
+</html>
